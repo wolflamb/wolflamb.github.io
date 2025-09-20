@@ -112,7 +112,7 @@ async function loadWords() {
     possibleWords = answerWords.slice();
 
     // fetch past answers daily
-    const pastURL = "https://mdahlman.github.io/wordle/answers.json";
+    const pastURL = "https://raw.githubusercontent.com/mdahlman/wordle/main/wordlist-answers-alphabetical.txt";
     const res = await fetch(pastURL);
     const past = await res.json();
 
