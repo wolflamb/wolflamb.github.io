@@ -36,15 +36,11 @@
 <div id="results"><em>Loading word list…</em></div>
 <div id="analysis"></div>
 
-<!-- Load embedded word lists -->
-<script src="answers.js"></script>
-<script src="guesses.js"></script>
-
 <script>
 const NUM_GUESSES = 6;
 const WORD_LEN = 5;
-let possibleWords = [];   // start with answer list
-let allowedWords = [];    // for scoring next best guesses
+let possibleWords = [];   // answers minus past answers
+let allowedWords = [];    // combined allowed guesses + answers for next best guess
 
 /* ---------- Build UI ---------- */
 const board = document.getElementById("board");
@@ -63,7 +59,7 @@ for (let r = 0; r < NUM_GUESSES; r++) {
     tile.dataset.col = c;
     tile.dataset.row = r;
 
-    tile.addEventListener("input", (e) => {
+    tile.addEventListener("input", () => {
       tile.value = tile.value.toUpperCase();
       if (tile.value && c < WORD_LEN-1) row.children[c+1].focus();
       checkRowAndFilter(row);
@@ -74,9 +70,8 @@ for (let r = 0; r < NUM_GUESSES; r++) {
       else if (e.key === "Enter") applyFilters();
     });
 
-    tile.addEventListener("click", (e) => {
+    tile.addEventListener("click", () => {
       if (tile.value) {
-        e.preventDefault();
         if (tile.dataset.state === "grey") { tile.dataset.state="yellow"; tile.className="tile yellow"; }
         else if (tile.dataset.state==="yellow") { tile.dataset.state="green"; tile.className="tile green"; }
         else { tile.dataset.state="grey"; tile.className="tile grey"; }
@@ -107,22 +102,35 @@ function clearTile(tile,row){
 /* ---------- Load Word Lists ---------- */
 async function loadWords() {
   try {
-    allowedWords = guessWords;
-    possibleWords = answerWords.slice();
+    // URLs for raw text files
+    const answersURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
+    const guessesURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-allowed-guesses.txt";
 
-    // fetch past answers daily
+    // fetch answers + allowed guesses
+    const [answersRes, guessesRes] = await Promise.all([fetch(answersURL), fetch(guessesURL)]);
+    const answersText = await answersRes.text();
+    const guessesText = await guessesRes.text();
+
+    const answerList = answersText.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
+    const guessList = guessesText.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
+
+    // fetch past answers (to exclude)
     const pastURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
-    const res = await fetch(pastURL);
-    const text = await res.text();
-    const past = text.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
-
+    const pastRes = await fetch(pastURL);
+    const pastText = await pastRes.text();
+    const past = pastText.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
     const pastSet = new Set(past.map(w=>w.toLowerCase()));
-    possibleWords = possibleWords.filter(w=>!pastSet.has(w));
+
+    possibleWords = answerList.filter(w=>!pastSet.has(w));
+
+    // allowedWords = guesses + answers
+    allowedWords = Array.from(new Set([...guessList, ...answerList]));
 
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
-  } catch (err){ 
-    document.getElementById("results").innerText = "Error loading words: "+err; 
+
+  } catch(err){
+    document.getElementById("results").innerText = "Error loading words: "+err;
   }
 }
 loadWords();
@@ -185,78 +193,4 @@ function analyzeRemainingWordle(filteredWords) {
       if(!letter) return;
       if(tile.dataset.state==='green'){
         confirmed.positions[letter] = confirmed.positions[letter]||[];
-        if(!confirmed.positions[letter].includes(i)) confirmed.positions[letter].push(i);
-      }
-    });
-  });
-
-  const positionCounts = Array.from({length: WORD_LEN}, () => ({}));
-  for(const word of filteredWords){
-    for(let i=0;i<WORD_LEN;i++){
-      const l = word[i];
-      if(confirmed.positions[l]?.includes(i)) continue;
-      positionCounts[i][l] = (positionCounts[i][l]||0)+1;
-    }
-  }
-
-  const letters = {};
-  for(let i=0;i<WORD_LEN;i++){
-    for(const [l,count] of Object.entries(positionCounts[i])){
-      if(!letters[l]) letters[l]=0;
-      letters[l]+=count;
-    }
-  }
-
-  const resultLetters=[];
-  for(const [l,totalCount] of Object.entries(letters)){
-    const remainingPositions = WORD_LEN - (confirmed.positions[l]?.length||0);
-    if(remainingPositions<=0) continue;
-    const probability = Math.min((totalCount/(totalWords*remainingPositions))*100,100);
-    resultLetters.push({letter:l.toUpperCase(), probability:probability.toFixed(1)});
-  }
-
-  for(const [l,pos] of Object.entries(confirmed.positions)){
-    resultLetters.push({letter:l.toUpperCase(), probability:100});
-  }
-
-  resultLetters.sort((a,b)=>b.probability - a.probability);
-
-  const letterCounts={};
-  for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
-  const wordScores = allowedWords.map(w=>{
-    const uniqueLetters=[...new Set(w)];
-    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
-    return {word:w.toUpperCase(), score};
-  });
-  wordScores.sort((a,b)=>b.score-a.score);
-  const nextBest=wordScores[0]?.word || "(none)";
-
-  return {letters:resultLetters, nextBest};
-}
-
-function updateAnalysis(filteredWords){
-  const analysis = analyzeRemainingWordle(filteredWords);
-  let analysisText = `Next best guess: ${analysis.nextBest}\n\nLetter probabilities:\n`;
-  analysis.letters.forEach(l=>analysisText+=`${l.letter}: ${l.probability}%\n`);
-  document.getElementById("analysis").innerText=analysisText;
-}
-
-/* ---------- Auto-filter ---------- */
-function checkRowAndFilter(row){
-  const filled = [...row.children].every(t=>t.value);
-  if(filled) applyFilters();
-}
-
-/* ---------- Reset ---------- */
-function resetBoard(){
-  document.querySelectorAll('.tile').forEach(t=>clearTile(t,t.parentElement));
-  showResults(possibleWords,"Loaded");
-  updateAnalysis(possibleWords);
-}
-
-function showResults(list,label){
-  document.getElementById("results").innerText=`${label} (${list.length}):\n\n`+(list.length?list.slice(0,200).join(", ")+(list.length>200?" …":""):"(no matches)");
-}
-</script>
-</body>
-</html>
+        if(!confirmed.positions[letter].includes(i)) confirmed.positions[letter].push(i
