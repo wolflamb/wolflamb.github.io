@@ -107,14 +107,14 @@ function clearTile(tile,row){
 /* ---------- Load Word Lists ---------- */
 async function loadWords() {
   try {
-    // answerWords and guessWords come from answers.js + guesses.js
     allowedWords = guessWords;
     possibleWords = answerWords.slice();
 
     // fetch past answers daily
     const pastURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
     const res = await fetch(pastURL);
-    const past = await res.json();
+    const text = await res.text();
+    const past = text.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
 
     const pastSet = new Set(past.map(w=>w.toLowerCase()));
     possibleWords = possibleWords.filter(w=>!pastSet.has(w));
@@ -176,7 +176,6 @@ function analyzeRemainingWordle(filteredWords) {
   const totalWords = filteredWords.length;
   if(totalWords===0) return {letters:[], nextBest:"(none)"};
 
-  // Track confirmed letters
   const confirmed = {positions:{}};
   const rows = document.querySelectorAll('.grid');
   rows.forEach(row=>{
@@ -191,17 +190,15 @@ function analyzeRemainingWordle(filteredWords) {
     });
   });
 
-  // Count occurrences per position
   const positionCounts = Array.from({length: WORD_LEN}, () => ({}));
   for(const word of filteredWords){
     for(let i=0;i<WORD_LEN;i++){
       const l = word[i];
-      if(confirmed.positions[l]?.includes(i)) continue; // skip already confirmed greens
+      if(confirmed.positions[l]?.includes(i)) continue;
       positionCounts[i][l] = (positionCounts[i][l]||0)+1;
     }
   }
 
-  // Compute probabilities
   const letters = {};
   for(let i=0;i<WORD_LEN;i++){
     for(const [l,count] of Object.entries(positionCounts[i])){
@@ -218,14 +215,12 @@ function analyzeRemainingWordle(filteredWords) {
     resultLetters.push({letter:l.toUpperCase(), probability:probability.toFixed(1)});
   }
 
-  // Add fully confirmed greens
   for(const [l,pos] of Object.entries(confirmed.positions)){
     resultLetters.push({letter:l.toUpperCase(), probability:100});
   }
 
   resultLetters.sort((a,b)=>b.probability - a.probability);
 
-  // Next best guess (from allowed guess list, not just remaining answers)
   const letterCounts={};
   for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
   const wordScores = allowedWords.map(w=>{
