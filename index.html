@@ -39,8 +39,7 @@
 <script>
 const NUM_GUESSES = 6;
 const WORD_LEN = 5;
-let possibleWords = [];   // answers minus past answers
-let allowedWords = [];    // combined allowed guesses + answers for next best guess
+let possibleWords = [];
 
 /* ---------- Build UI ---------- */
 const board = document.getElementById("board");
@@ -59,7 +58,7 @@ for (let r = 0; r < NUM_GUESSES; r++) {
     tile.dataset.col = c;
     tile.dataset.row = r;
 
-    tile.addEventListener("input", () => {
+    tile.addEventListener("input", (e) => {
       tile.value = tile.value.toUpperCase();
       if (tile.value && c < WORD_LEN-1) row.children[c+1].focus();
       checkRowAndFilter(row);
@@ -70,8 +69,9 @@ for (let r = 0; r < NUM_GUESSES; r++) {
       else if (e.key === "Enter") applyFilters();
     });
 
-    tile.addEventListener("click", () => {
+    tile.addEventListener("click", (e) => {
       if (tile.value) {
+        e.preventDefault();
         if (tile.dataset.state === "grey") { tile.dataset.state="yellow"; tile.className="tile yellow"; }
         else if (tile.dataset.state==="yellow") { tile.dataset.state="green"; tile.className="tile green"; }
         else { tile.dataset.state="grey"; tile.className="tile grey"; }
@@ -99,39 +99,27 @@ function clearTile(tile,row){
   checkRowAndFilter(row);
 }
 
-/* ---------- Load Word Lists ---------- */
+/* ---------- Wordlist ---------- */
+async function fetchHTML(url) {
+  const proxy = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+  const res = await fetch(proxy);
+  const data = await res.json();
+  return data.contents;
+}
+
 async function loadWords() {
+  const wordListURL = "https://www.wordunscrambler.net/word-list/wordle-word-list";
+  const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
   try {
-    // URLs for raw text files
-    const answersURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
-    const guessesURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-allowed-guesses.txt";
-
-    // fetch answers + allowed guesses
-    const [answersRes, guessesRes] = await Promise.all([fetch(answersURL), fetch(guessesURL)]);
-    const answersText = await answersRes.text();
-    const guessesText = await guessesRes.text();
-
-    const answerList = answersText.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
-    const guessList = guessesText.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
-
-    // fetch past answers (to exclude)
-    const pastURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
-    const pastRes = await fetch(pastURL);
-    const pastText = await pastRes.text();
-    const past = pastText.split(/\r?\n/).map(w=>w.trim()).filter(Boolean);
-    const pastSet = new Set(past.map(w=>w.toLowerCase()));
-
-    possibleWords = answerList.filter(w=>!pastSet.has(w));
-
-    // allowedWords = guesses + answers
-    allowedWords = Array.from(new Set([...guessList, ...answerList]));
-
+    const [mainHTML,pastHTML] = await Promise.all([fetchHTML(wordListURL),fetchHTML(pastURL)]);
+    const mainMatches = mainHTML.match(/\b[a-z]{5}\b/gi)||[];
+    const pastMatches = pastHTML.match(/\b[a-z]{5}\b/gi)||[];
+    const mainSet = new Set(mainMatches.map(w=>w.toLowerCase()));
+    const pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
+    possibleWords = [...mainSet].filter(w=>!pastSet.has(w));
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
-
-  } catch(err){
-    document.getElementById("results").innerText = "Error loading words: "+err;
-  }
+  } catch (err){ document.getElementById("results").innerText = "Error loading word lists: "+err; }
 }
 loadWords();
 
@@ -184,6 +172,7 @@ function analyzeRemainingWordle(filteredWords) {
   const totalWords = filteredWords.length;
   if(totalWords===0) return {letters:[], nextBest:"(none)"};
 
+  // Track confirmed letters
   const confirmed = {positions:{}};
   const rows = document.querySelectorAll('.grid');
   rows.forEach(row=>{
@@ -193,4 +182,82 @@ function analyzeRemainingWordle(filteredWords) {
       if(!letter) return;
       if(tile.dataset.state==='green'){
         confirmed.positions[letter] = confirmed.positions[letter]||[];
-        if(!confirmed.positions[letter].includes(i)) confirmed.positions[letter].push(i
+        if(!confirmed.positions[letter].includes(i)) confirmed.positions[letter].push(i);
+      }
+    });
+  });
+
+  // Count occurrences per position
+  const positionCounts = Array.from({length: WORD_LEN}, () => ({}));
+  for(const word of filteredWords){
+    for(let i=0;i<WORD_LEN;i++){
+      const l = word[i];
+      if(confirmed.positions[l]?.includes(i)) continue; // skip already confirmed greens
+      positionCounts[i][l] = (positionCounts[i][l]||0)+1;
+    }
+  }
+
+  // Compute probabilities
+  const letters = {};
+  for(let i=0;i<WORD_LEN;i++){
+    for(const [l,count] of Object.entries(positionCounts[i])){
+      if(!letters[l]) letters[l]=0;
+      letters[l]+=count;
+    }
+  }
+
+  const resultLetters=[];
+  for(const [l,totalCount] of Object.entries(letters)){
+    const remainingPositions = WORD_LEN - (confirmed.positions[l]?.length||0);
+    if(remainingPositions<=0) continue;
+    const probability = Math.min((totalCount/(totalWords*remainingPositions))*100,100);
+    resultLetters.push({letter:l.toUpperCase(), probability:probability.toFixed(1)});
+  }
+
+  // Add fully confirmed greens
+  for(const [l,pos] of Object.entries(confirmed.positions)){
+    resultLetters.push({letter:l.toUpperCase(), probability:100});
+  }
+
+  resultLetters.sort((a,b)=>b.probability - a.probability);
+
+  // Next best guess
+  const letterCounts={};
+  for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
+  const wordScores = filteredWords.map(w=>{
+    const uniqueLetters=[...new Set(w)];
+    const score=uniqueLetters.reduce((s,l)=>s+letterCounts[l],0);
+    return {word:w.toUpperCase(), score};
+  });
+  wordScores.sort((a,b)=>b.score-a.score);
+  const nextBest=wordScores[0]?.word || "(none)";
+
+  return {letters:resultLetters, nextBest};
+}
+
+function updateAnalysis(filteredWords){
+  const analysis = analyzeRemainingWordle(filteredWords);
+  let analysisText = `Next best guess: ${analysis.nextBest}\n\nLetter probabilities:\n`;
+  analysis.letters.forEach(l=>analysisText+=`${l.letter}: ${l.probability}%\n`);
+  document.getElementById("analysis").innerText=analysisText;
+}
+
+/* ---------- Auto-filter ---------- */
+function checkRowAndFilter(row){
+  const filled = [...row.children].every(t=>t.value);
+  if(filled) applyFilters();
+}
+
+/* ---------- Reset ---------- */
+function resetBoard(){
+  document.querySelectorAll('.tile').forEach(t=>clearTile(t,t.parentElement));
+  showResults(possibleWords,"Loaded");
+  updateAnalysis(possibleWords);
+}
+
+function showResults(list,label){
+  document.getElementById("results").innerText=`${label} (${list.length}):\n\n`+(list.length?list.slice(0,200).join(", ")+(list.length>200?" …":""):"(no matches)");
+}
+</script>
+</body>
+</html>
