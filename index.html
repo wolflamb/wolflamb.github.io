@@ -36,15 +36,15 @@
 <div id="results"><em>Loading word list…</em></div>
 <div id="analysis"></div>
 
-<!-- Load local lists -->
-<script src="guesses.js"></script>
+<!-- Load embedded word lists -->
 <script src="answers.js"></script>
-<script src="past.js"></script>
+<script src="guesses.js"></script>
 
 <script>
 const NUM_GUESSES = 6;
 const WORD_LEN = 5;
-let possibleWords = [];
+let possibleWords = [];   // start with answer list
+let allowedWords = [];    // for scoring next best guesses
 
 /* ---------- Build UI ---------- */
 const board = document.getElementById("board");
@@ -104,16 +104,25 @@ function clearTile(tile,row){
   checkRowAndFilter(row);
 }
 
-/* ---------- Wordlist ---------- */
-function loadWords() {
+/* ---------- Load Word Lists ---------- */
+async function loadWords() {
   try {
-    const mainSet = new Set(answerWords.map(w => w.toLowerCase()));
-    const pastSet = new Set(pastSolutions.map(w => w.toLowerCase()));
-    possibleWords = [...mainSet].filter(w => !pastSet.has(w));
+    // answerWords and guessWords come from answers.js + guesses.js
+    allowedWords = guessWords;
+    possibleWords = answerWords.slice();
+
+    // fetch past answers daily
+    const pastURL = "https://mdahlman.github.io/wordle/answers.json";
+    const res = await fetch(pastURL);
+    const past = await res.json();
+
+    const pastSet = new Set(past.map(w=>w.toLowerCase()));
+    possibleWords = possibleWords.filter(w=>!pastSet.has(w));
+
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
   } catch (err){ 
-    document.getElementById("results").innerText = "Error loading word lists: "+err; 
+    document.getElementById("results").innerText = "Error loading words: "+err; 
   }
 }
 loadWords();
@@ -216,12 +225,12 @@ function analyzeRemainingWordle(filteredWords) {
 
   resultLetters.sort((a,b)=>b.probability - a.probability);
 
-  // Next best guess
+  // Next best guess (from allowed guess list, not just remaining answers)
   const letterCounts={};
   for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
-  const wordScores = filteredWords.map(w=>{
+  const wordScores = allowedWords.map(w=>{
     const uniqueLetters=[...new Set(w)];
-    const score=uniqueLetters.reduce((s,l)=>s+letterCounts[l],0);
+    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
     return {word:w.toUpperCase(), score};
   });
   wordScores.sort((a,b)=>b.score-a.score);
