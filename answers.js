@@ -2314,4 +2314,4 @@ youth
 zebra
 zesty
 zonal";
-const answerWords = answerWordsList.split(' ');
+const answerWords = answerWordsList.split(\n);
