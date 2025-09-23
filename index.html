@@ -24,7 +24,7 @@
   </style>
 </head>
 <body>
-<h1>Wordle Solver v1.1</h1>
+<h1>Wordle Solver v1.2</h1>
 <p class="hint">Type guesses (auto-advance). Tap a filled tile to cycle colour. Long-press to clear. Filters auto-update when a row is complete.</p>
 
 <div id="board" aria-label="Wordle input board"></div>
@@ -40,7 +40,6 @@
 const NUM_GUESSES = 6;
 const WORD_LEN = 5;
 let possibleWords = [];
-let allowedWords = [];
 
 /* ---------- Build UI ---------- */
 const board = document.getElementById("board");
@@ -100,41 +99,27 @@ function clearTile(tile,row){
   checkRowAndFilter(row);
 }
 
-/* ---------- Load Words ---------- */
+/* ---------- Wordlist ---------- */
+async function fetchHTML(url) {
+  const proxy = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+  const res = await fetch(proxy);
+  const data = await res.json();
+  return data.contents;
+}
+
 async function loadWords() {
+  const wordListURL = "https://www.wordunscrambler.net/word-list/wordle-word-list";
+  const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
   try {
-    // Fetch cfreshman's answers
-    const answersURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
-    const answersResp = await fetch(answersURL);
-    const answersText = await answersResp.text();
-    let answerList = answersText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
-
-    // Fetch cfreshman's allowed guesses
-    const guessesURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-allowed-guesses.txt";
-    const guessesResp = await fetch(guessesURL);
-    const guessesText = await guessesResp.text();
-    const guessList = guessesText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
-
-    // Fetch past answers from Rock Paper Shotgun
-    const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
-    const pastResp = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(pastURL)}`);
-    const pastData = await pastResp.json();
-    const pastMatches = pastData.contents.match(/\b[a-z]{5}\b/gi) || [];
+    const [mainHTML,pastHTML] = await Promise.all([fetchHTML(wordListURL),fetchHTML(pastURL)]);
+    const mainMatches = mainHTML.match(/\b[a-z]{5}\b/gi)||[];
+    const pastMatches = pastHTML.match(/\b[a-z]{5}\b/gi)||[];
+    const mainSet = new Set(mainMatches.map(w=>w.toLowerCase()));
     const pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
-
-    // Filter out past answers
-    answerList = answerList.filter(w => !pastSet.has(w));
-
-    // Set lists
-    allowedWords = Array.from(new Set([...answerList, ...guessList]));
-    possibleWords = answerList.slice();
-
+    possibleWords = [...mainSet].filter(w=>!pastSet.has(w));
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
-
-  } catch(err){
-    document.getElementById("results").innerText = "Error loading words: "+err;
-  }
+  } catch (err){ document.getElementById("results").innerText = "Error loading word lists: "+err; }
 }
 loadWords();
 
@@ -183,9 +168,9 @@ function applyFilters(){
 }
 
 /* ---------- Analysis / Next Best Guess ---------- */
-function analyzeRemainingWordle(filteredWords){
+function analyzeRemainingWordle(filteredWords) {
   const totalWords = filteredWords.length;
-  if(totalWords===0) return {letters:[], nextBestElimination:"(none)", nextBestSolution:"(none)"};
+  if(totalWords===0) return {letters:[], nextBest:"(none)"};
 
   // Track confirmed letters
   const confirmed = {positions:{}};
@@ -212,7 +197,7 @@ function analyzeRemainingWordle(filteredWords){
     }
   }
 
-  // Compute letter probabilities
+  // Compute probabilities
   const letters = {};
   for(let i=0;i<WORD_LEN;i++){
     for(const [l,count] of Object.entries(positionCounts[i])){
@@ -221,7 +206,6 @@ function analyzeRemainingWordle(filteredWords){
     }
   }
 
-  // Result letters
   const resultLetters=[];
   for(const [l,totalCount] of Object.entries(letters)){
     const remainingPositions = WORD_LEN - (confirmed.positions[l]?.length||0);
@@ -230,39 +214,30 @@ function analyzeRemainingWordle(filteredWords){
     resultLetters.push({letter:l.toUpperCase(), probability:probability.toFixed(1)});
   }
 
+  // Add fully confirmed greens
   for(const [l,pos] of Object.entries(confirmed.positions)){
     resultLetters.push({letter:l.toUpperCase(), probability:100});
   }
 
   resultLetters.sort((a,b)=>b.probability - a.probability);
 
-  // Next best elimination (from allowedWords)
+  // Next best guess
   const letterCounts={};
   for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
-  const wordScores = allowedWords.map(w=>{
+  const wordScores = filteredWords.map(w=>{
     const uniqueLetters=[...new Set(w)];
-    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
+    const score=uniqueLetters.reduce((s,l)=>s+letterCounts[l],0);
     return {word:w.toUpperCase(), score};
   });
   wordScores.sort((a,b)=>b.score-a.score);
-  const nextBestElimination=wordScores[0]?.word || "(none)";
+  const nextBest=wordScores[0]?.word || "(none)";
 
-  // Next best solution (only from filteredWords)
-  const solutionScores = filteredWords.map(w=>{
-    const uniqueLetters=[...new Set(w)];
-    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
-    return {word:w.toUpperCase(), score};
-  });
-  solutionScores.sort((a,b)=>b.score-a.score);
-  const nextBestSolution = solutionScores[0]?.word || "(none)";
-
-  return {letters:resultLetters, nextBestElimination, nextBestSolution};
+  return {letters:resultLetters, nextBest};
 }
 
 function updateAnalysis(filteredWords){
   const analysis = analyzeRemainingWordle(filteredWords);
-  let analysisText = `Next best guess for elimination: ${analysis.nextBestElimination}\n`;
-  analysisText += `Next best guess likely solution: ${analysis.nextBestSolution}\n\nLetter probabilities:\n`;
+  let analysisText = `Next best guess: ${analysis.nextBest}\n\nLetter probabilities:\n`;
   analysis.letters.forEach(l=>analysisText+=`${l.letter}: ${l.probability}%\n`);
   document.getElementById("analysis").innerText=analysisText;
 }
