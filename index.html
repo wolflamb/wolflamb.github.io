@@ -21,6 +21,12 @@
     #results, #analysis { margin-top: 16px; max-height: 300px; overflow-y: auto; text-align:left; white-space: pre-wrap; background: #fff; border: 1px solid #eee; padding: 10px; border-radius: 6px; }
     button { padding: 8px 12px; font-size: 15px; margin: 4px; }
     p.hint { font-size: 14px; color: #333; }
+
+    /* Loading bar */
+    #loading { margin: 20px auto; max-width: 400px; }
+    #loading-bar-container { border: 1px solid #ccc; border-radius: 4px; height: 20px; width: 100%; overflow: hidden; }
+    #loading-bar { background: #4caf50; height: 100%; width: 0%; transition: width 0.3s; }
+    #loading-text { margin-top: 6px; font-size: 14px; color: #333; }
   </style>
 </head>
 <body>
@@ -31,6 +37,14 @@
 
 <div id="controls">
   <button onclick="resetBoard()">Reset board</button>
+</div>
+
+<!-- Loading bar -->
+<div id="loading">
+  <div id="loading-bar-container">
+    <div id="loading-bar"></div>
+  </div>
+  <p id="loading-text">Loading word lists… 0%</p>
 </div>
 
 <div id="results"><em>Loading word list…</em></div>
@@ -100,34 +114,52 @@ function clearTile(tile,row){
   checkRowAndFilter(row);
 }
 
-/* ---------- Load Words ---------- */
+/* ---------- Load Words with Progress Bar ---------- */
 async function loadWords() {
+  const updateProgress = (pct, msg) => {
+    document.getElementById("loading-bar").style.width = pct + "%";
+    document.getElementById("loading-text").innerText = msg + " " + pct + "%";
+  };
+
   try {
-    // Fetch cfreshman's answers
+    // Step 1: Answers
+    updateProgress(10, "Fetching answers…");
     const answersURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
     const answersResp = await fetch(answersURL);
     const answersText = await answersResp.text();
     let answerList = answersText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
+    updateProgress(40, "Fetched answers");
 
-    // Fetch cfreshman's allowed guesses
+    // Step 2: Allowed guesses
     const guessesURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-allowed-guesses.txt";
     const guessesResp = await fetch(guessesURL);
     const guessesText = await guessesResp.text();
     const guessList = guessesText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
+    updateProgress(70, "Fetched guesses");
 
-    // Fetch past answers from Rock Paper Shotgun
-    const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
-    const pastResp = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(pastURL)}`);
-    const pastData = await pastResp.json();
-    const pastMatches = pastData.contents.match(/\b[a-z]{5}\b/gi) || [];
-    const pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
+    // Step 3: Past answers (graceful fallback)
+    let pastSet = new Set();
+    try {
+      const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
+      const pastResp = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(pastURL)}`);
+      const pastData = await pastResp.json();
+      const pastMatches = pastData.contents.match(/\b[a-z]{5}\b/gi) || [];
+      pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
+      updateProgress(90, "Fetched past answers");
+    } catch(err) {
+      console.warn("Past answers fetch failed, continuing without them:", err);
+      updateProgress(90, "Skipped past answers");
+    }
 
-    // Filter out past answers
+    // Apply past answers filter
     answerList = answerList.filter(w => !pastSet.has(w));
 
     // Set lists
     allowedWords = Array.from(new Set([...answerList, ...guessList]));
     possibleWords = answerList.slice();
+
+    updateProgress(100, "Done!");
+    document.getElementById("loading").style.display = "none";
 
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
@@ -207,7 +239,7 @@ function analyzeRemainingWordle(filteredWords){
   for(const word of filteredWords){
     for(let i=0;i<WORD_LEN;i++){
       const l = word[i];
-      if(confirmed.positions[l]?.includes(i)) continue; // skip already confirmed greens
+      if(confirmed.positions[l]?.includes(i)) continue;
       positionCounts[i][l] = (positionCounts[i][l]||0)+1;
     }
   }
@@ -221,7 +253,6 @@ function analyzeRemainingWordle(filteredWords){
     }
   }
 
-  // Result letters
   const resultLetters=[];
   for(const [l,totalCount] of Object.entries(letters)){
     const remainingPositions = WORD_LEN - (confirmed.positions[l]?.length||0);
