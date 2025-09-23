@@ -24,7 +24,7 @@
   </style>
 </head>
 <body>
-<h1>Wordle Solver v1.2</h1>
+<h1>Wordle Solver v1.3</h1>
 <p class="hint">Type guesses (auto-advance). Tap a filled tile to cycle colour. Long-press to clear. Filters auto-update when a row is complete.</p>
 
 <div id="board" aria-label="Wordle input board"></div>
@@ -36,10 +36,15 @@
 <div id="results"><em>Loading word list…</em></div>
 <div id="analysis"></div>
 
+<!-- Load embedded word lists -->
+<script src="answers.js"></script>
+<script src="guesses.js"></script>
+
 <script>
 const NUM_GUESSES = 6;
 const WORD_LEN = 5;
-let possibleWords = [];
+let possibleWords = [];   // start with answer list
+let allowedWords = [];    // for scoring next best guesses
 
 /* ---------- Build UI ---------- */
 const board = document.getElementById("board");
@@ -99,27 +104,26 @@ function clearTile(tile,row){
   checkRowAndFilter(row);
 }
 
-/* ---------- Wordlist ---------- */
-async function fetchHTML(url) {
-  const proxy = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
-  const res = await fetch(proxy);
-  const data = await res.json();
-  return data.contents;
-}
-
+/* ---------- Load Word Lists ---------- */
 async function loadWords() {
-  const wordListURL = "https://www.wordunscrambler.net/word-list/wordle-word-list";
-  const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
   try {
-    const [mainHTML,pastHTML] = await Promise.all([fetchHTML(wordListURL),fetchHTML(pastURL)]);
-    const mainMatches = mainHTML.match(/\b[a-z]{5}\b/gi)||[];
-    const pastMatches = pastHTML.match(/\b[a-z]{5}\b/gi)||[];
-    const mainSet = new Set(mainMatches.map(w=>w.toLowerCase()));
-    const pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
-    possibleWords = [...mainSet].filter(w=>!pastSet.has(w));
+    // answerWords and guessWords come from answers.js + guesses.js
+    allowedWords = guessWords;
+    possibleWords = answerWords.slice();
+
+    // fetch past answers daily
+    const pastURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
+    const res = await fetch(pastURL);
+    const past = await res.json();
+
+    const pastSet = new Set(past.map(w=>w.toLowerCase()));
+    possibleWords = possibleWords.filter(w=>!pastSet.has(w));
+
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
-  } catch (err){ document.getElementById("results").innerText = "Error loading word lists: "+err; }
+  } catch (err){ 
+    document.getElementById("results").innerText = "Error loading words: "+err; 
+  }
 }
 loadWords();
 
@@ -221,12 +225,12 @@ function analyzeRemainingWordle(filteredWords) {
 
   resultLetters.sort((a,b)=>b.probability - a.probability);
 
-  // Next best guess
+  // Next best guess (from allowed guess list, not just remaining answers)
   const letterCounts={};
   for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
-  const wordScores = filteredWords.map(w=>{
+  const wordScores = allowedWords.map(w=>{
     const uniqueLetters=[...new Set(w)];
-    const score=uniqueLetters.reduce((s,l)=>s+letterCounts[l],0);
+    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
     return {word:w.toUpperCase(), score};
   });
   wordScores.sort((a,b)=>b.score-a.score);
