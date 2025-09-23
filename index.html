@@ -21,12 +21,8 @@
     #results, #analysis { margin-top: 16px; max-height: 300px; overflow-y: auto; text-align:left; white-space: pre-wrap; background: #fff; border: 1px solid #eee; padding: 10px; border-radius: 6px; }
     button { padding: 8px 12px; font-size: 15px; margin: 4px; }
     p.hint { font-size: 14px; color: #333; }
-
-    /* Loading bar */
-    #loading { margin: 20px auto; max-width: 400px; }
-    #loading-bar-container { border: 1px solid #ccc; border-radius: 4px; height: 20px; width: 100%; overflow: hidden; }
-    #loading-bar { background: #4caf50; height: 100%; width: 0%; transition: width 0.3s; }
-    #loading-text { margin-top: 6px; font-size: 14px; color: #333; }
+    #progress { width: 100%; background: #ddd; height: 16px; border-radius: 8px; overflow: hidden; margin-top: 10px; }
+    #progress-bar { width: 0%; height: 100%; background: #4caf50; text-align: center; color: white; font-size: 12px; line-height: 16px; transition: width 0.3s; }
   </style>
 </head>
 <body>
@@ -39,14 +35,7 @@
   <button onclick="resetBoard()">Reset board</button>
 </div>
 
-<!-- Loading bar -->
-<div id="loading">
-  <div id="loading-bar-container">
-    <div id="loading-bar"></div>
-  </div>
-  <p id="loading-text">Loading word lists… 0%</p>
-</div>
-
+<div id="progress"><div id="progress-bar">0%</div></div>
 <div id="results"><em>Loading word list…</em></div>
 <div id="analysis"></div>
 
@@ -114,58 +103,62 @@ function clearTile(tile,row){
   checkRowAndFilter(row);
 }
 
-/* ---------- Load Words with Progress Bar ---------- */
-async function loadWords() {
-  const updateProgress = (pct, msg) => {
-    document.getElementById("loading-bar").style.width = pct + "%";
-    document.getElementById("loading-text").innerText = msg + " " + pct + "%";
-  };
+/* ---------- Progress Bar ---------- */
+function setProgress(pct,text=""){
+  const bar=document.getElementById("progress-bar");
+  bar.style.width=pct+"%";
+  bar.textContent=text||pct+"%";
+}
 
+/* ---------- Load Words ---------- */
+async function loadWords() {
   try {
-    // Step 1: Answers
-    updateProgress(10, "Fetching answers…");
+    let steps = 3; 
+    let done = 0;
+
+    const update = (msg) => {
+      done++;
+      setProgress(Math.round((done/steps)*100), msg);
+    };
+
+    // Fetch cfreshman's answers
     const answersURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
     const answersResp = await fetch(answersURL);
     const answersText = await answersResp.text();
     let answerList = answersText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
-    updateProgress(40, "Fetched answers");
+    update("Answers loaded");
 
-    // Step 2: Allowed guesses
+    // Fetch cfreshman's allowed guesses
     const guessesURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-allowed-guesses.txt";
     const guessesResp = await fetch(guessesURL);
     const guessesText = await guessesResp.text();
     const guessList = guessesText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
-    updateProgress(70, "Fetched guesses");
+    update("Guesses loaded");
 
-    // Step 3: Past answers (graceful fallback)
-    let pastSet = new Set();
+    // Fetch past answers (with fallback)
     try {
       const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
       const pastResp = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(pastURL)}`);
       const pastData = await pastResp.json();
       const pastMatches = pastData.contents.match(/\b[a-z]{5}\b/gi) || [];
-      pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
-      updateProgress(90, "Fetched past answers");
-    } catch(err) {
-      console.warn("Past answers fetch failed, continuing without them:", err);
-      updateProgress(90, "Skipped past answers");
+      const pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
+      answerList = answerList.filter(w => !pastSet.has(w));
+      update("Past answers removed");
+    } catch(e){
+      console.warn("Past answers fetch failed",e);
+      update("Past answers skipped");
     }
-
-    // Apply past answers filter
-    answerList = answerList.filter(w => !pastSet.has(w));
 
     // Set lists
     allowedWords = Array.from(new Set([...answerList, ...guessList]));
     possibleWords = answerList.slice();
-
-    updateProgress(100, "Done!");
-    document.getElementById("loading").style.display = "none";
 
     showResults(possibleWords,"Loaded");
     updateAnalysis(possibleWords);
 
   } catch(err){
     document.getElementById("results").innerText = "Error loading words: "+err;
+    setProgress(100,"Error");
   }
 }
 loadWords();
@@ -239,7 +232,7 @@ function analyzeRemainingWordle(filteredWords){
   for(const word of filteredWords){
     for(let i=0;i<WORD_LEN;i++){
       const l = word[i];
-      if(confirmed.positions[l]?.includes(i)) continue;
+      if(confirmed.positions[l]?.includes(i)) continue; // skip already confirmed greens
       positionCounts[i][l] = (positionCounts[i][l]||0)+1;
     }
   }
@@ -253,6 +246,7 @@ function analyzeRemainingWordle(filteredWords){
     }
   }
 
+  // Result letters
   const resultLetters=[];
   for(const [l,totalCount] of Object.entries(letters)){
     const remainingPositions = WORD_LEN - (confirmed.positions[l]?.length||0);
@@ -260,25 +254,52 @@ function analyzeRemainingWordle(filteredWords){
     const probability = Math.min((totalCount/(totalWords*remainingPositions))*100,100);
     resultLetters.push({letter:l.toUpperCase(), probability:probability.toFixed(1)});
   }
-
   for(const [l,pos] of Object.entries(confirmed.positions)){
     resultLetters.push({letter:l.toUpperCase(), probability:100});
   }
-
   resultLetters.sort((a,b)=>b.probability - a.probability);
 
-  // Next best elimination (from allowedWords)
+  // Frequency map
   const letterCounts={};
   for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
-  const wordScores = allowedWords.map(w=>{
-    const uniqueLetters=[...new Set(w)];
-    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
-    return {word:w.toUpperCase(), score};
-  });
-  wordScores.sort((a,b)=>b.score-a.score);
-  const nextBestElimination=wordScores[0]?.word || "(none)";
 
-  // Next best solution (only from filteredWords)
+  /* ----- Elimination scoring with yellow bias and green avoidance ----- */
+  const yellowHints=[]; const greenHints=[];
+  rows.forEach(row=>{
+    const tiles=[...row.querySelectorAll('.tile')];
+    tiles.forEach((tile,i)=>{
+      const l=tile.value.trim().toLowerCase();
+      if(!l) return;
+      if(tile.dataset.state==='yellow') yellowHints.push({letter:l,pos:i});
+      if(tile.dataset.state==='green') greenHints.push({letter:l,pos:i});
+    });
+  });
+
+  const eliminationScores = allowedWords.map(word=>{
+    const uniqueLetters=[...new Set(word)];
+    let score=0;
+
+    // Favor yellows, but only if not in same position
+    for(const {letter,pos} of yellowHints){
+      if(word.includes(letter) && word[pos]!==letter){
+        score+=50;
+      }
+    }
+
+    // Penalize greens
+    for(const {letter} of greenHints){
+      if(word.includes(letter)) score-=20;
+    }
+
+    // General frequency coverage
+    score+=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
+
+    return {word:word.toUpperCase(), score};
+  });
+  eliminationScores.sort((a,b)=>b.score-a.score);
+  const nextBestElimination=eliminationScores[0]?.word || "(none)";
+
+  // Best likely solution (filteredWords only)
   const solutionScores = filteredWords.map(w=>{
     const uniqueLetters=[...new Set(w)];
     const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
