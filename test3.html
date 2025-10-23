@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wordle Solver</title>
+<style>
+  body { font-family: Arial, sans-serif; text-align: center; background: #f9f9f9; }
+  .tile { display: inline-block; width: 40px; height: 40px; line-height: 40px; margin: 2px; border: 2px solid #999; font-size: 24px; cursor: pointer; }
+  .gray { background: #999; color: white; }
+  .yellow { background: #c9b458; color: white; }
+  .green { background: #6aaa64; color: white; }
+  #board { margin-top: 20px; }
+  #results { margin-top: 30px; font-size: 18px; }
+  #loadingBarContainer { width: 80%; height: 20px; background: #ddd; margin: 20px auto; border-radius: 10px; overflow: hidden; }
+  #loadingBar { width: 0%; height: 100%; background: #6aaa64; transition: width 0.3s; }
+  #loadingText { font-size: 14px; margin-top: 5px; color: #333; }
+</style>
+</head>
+<body>
+
+<h1>Wordle Solver</h1>
+<div id="loadingBarContainer"><div id="loadingBar"></div></div>
+<div id="loadingText">Loading word lists...</div>
+<div id="board"></div>
+<button id="analyzeButton">Analyze</button>
+<div id="results"></div>
+
+<script>
+const answersURL = "https://raw.githubusercontent.com/tabatkins/wordle-list/main/answers.txt";
+const guessesURL = "https://raw.githubusercontent.com/tabatkins/wordle-list/main/allowed-guesses.txt";
+const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
+
+let answers = [];
+let guesses = [];
+let allWords = [];
+let pastAnswers = [];
+let loadingProgress = 0;
+let totalFetches = 3;
+
+// --- LOADING BAR ---
+function updateLoadingBar() {
+  loadingProgress++;
+  const percent = Math.min(100, (loadingProgress / totalFetches) * 100);
+  document.getElementById('loadingBar').style.width = percent + '%';
+  if (percent === 100) {
+    document.getElementById('loadingText').innerText = 'Loaded';
+  }
+}
+
+// --- FETCH WORD LISTS ---
+async function loadWordLists() {
+  try {
+    const [answersRes, guessesRes, pastRes] = await Promise.allSettled([
+      fetch(answersURL),
+      fetch(guessesURL),
+      fetch(pastURL)
+    ]);
+
+    if (answersRes.status === "fulfilled") {
+      const text = await answersRes.value.text();
+      answers = text.split("\n").map(w => w.trim()).filter(Boolean);
+    }
+    updateLoadingBar();
+
+    if (guessesRes.status === "fulfilled") {
+      const text = await guessesRes.value.text();
+      guesses = text.split("\n").map(w => w.trim()).filter(Boolean);
+    }
+    updateLoadingBar();
+
+    if (pastRes.status === "fulfilled") {
+      const html = await pastRes.value.text();
+      const match = html.match(/<ul>([\s\S]*?)<\/ul>/);
+      if (match) {
+        pastAnswers = match[1].match(/<li>(.*?)<\/li>/g).map(li => li.replace(/<\/?li>/g, "").trim());
+      }
+    }
+    updateLoadingBar();
+
+    if (!answers.length || !guesses.length) throw new Error("Missing lists");
+
+    // Combine guesses and answers for elimination
+    allWords = Array.from(new Set([...answers, ...guesses]));
+    console.log(`Loaded ${answers.length} answers and ${guesses.length} guesses.`);
+  } catch (err) {
+    console.warn("Fetch failed, using fallback lists:", err);
+    document.getElementById("loadingText").innerText = "Error loading lists – using backup.";
+    answers = ["arise","soare","roate","raise","irate"];
+    guesses = ["arose","stare","crate","slate","trace"];
+    allWords = Array.from(new Set([...answers, ...guesses]));
+    updateLoadingBar();
+  }
+}
+
+// --- TILE SETUP ---
+const board = document.getElementById('board');
+const wordLength = 5;
+let tiles = [];
+
+function createBoard() {
+  board.innerHTML = "";
+  for (let i = 0; i < wordLength; i++) {
+    const tile = document.createElement('div');
+    tile.className = 'tile gray';
+    tile.dataset.state = 'gray';
+    tile.dataset.letter = '';
+    tile.textContent = '_';
+    tile.addEventListener('click', () => cycleState(tile));
+    tiles.push(tile);
+    board.appendChild(tile);
+  }
+}
+
+function cycleState(tile) {
+  const states = ['gray', 'yellow', 'green'];
+  let current = states.indexOf(tile.dataset.state);
+  let next = (current + 1) % states.length;
+  tile.dataset.state = states[next];
+  tile.className = 'tile ' + states[next];
+}
+
+// --- ANALYSIS ---
+document.getElementById('analyzeButton').addEventListener('click', analyze);
+
+function analyze() {
+  const pattern = tiles.map(t => t.dataset.state);
+  const letters = tiles.map(t => prompt(`Enter letter for position ${tiles.indexOf(t)+1}:`)?.toLowerCase() || "_");
+  const filtered = answers.filter(word => matchesPattern(word, letters, pattern));
+  showResults(filtered);
+}
+
+function matchesPattern(word, letters, pattern) {
+  for (let i = 0; i < wordLength; i++) {
+    const letter = letters[i];
+    if (pattern[i] === 'green' && word[i] !== letter) return false;
+    if (pattern[i] === 'yellow' && (!word.includes(letter) || word[i] === letter)) return false;
+    if (pattern[i] === 'gray' && word.includes(letter)) return false;
+  }
+  return true;
+}
+
+// --- SCORING FOR ELIMINATION ---
+function bestWordForElimination(possible, allowed) {
+  let bestWord = "";
+  let bestScore = -1;
+  for (const guess of allowed) {
+    const uniqueLetters = new Set(guess.split(""));
+    const score = [...uniqueLetters].reduce((sum, l) => {
+      let count = 0;
+      for (const w of possible) if (w.includes(l)) count++;
+      return sum + count;
+    }, 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestWord = guess;
+    }
+  }
+  return bestWord;
+}
+
+// --- RESULTS ---
+function showResults(filtered) {
+  if (!filtered.length) {
+    document.getElementById('results').innerText = "No matching words found.";
+    return;
+  }
+  const likely = filtered[0];
+  const elimination = bestWordForElimination(filtered, allWords);
+  document.getElementById('results').innerHTML = `
+    <p><b>Possible solutions:</b> ${filtered.slice(0, 20).join(', ')}</p>
+    <p><b>Next best (likely solution):</b> ${likely}</p>
+    <p><b>Next best (for elimination):</b> ${elimination}</p>
+  `;
+}
+
+// --- INIT ---
+createBoard();
+loadWordLists();
+</script>
+
+</body>
+</html>
