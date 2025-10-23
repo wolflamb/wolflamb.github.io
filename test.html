@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Wordle Solver with Next Best Guess</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; text-align: center; background: #fafafa; padding: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(5, 56px); gap: 10px; margin: 12px auto; }
+    .tile {
+      width: 56px; height: 56px; text-align: center;
+      border: 2px solid #bbb; text-transform: uppercase;
+      font-size: 26px; font-weight: 700;
+      border-radius: 6px; padding: 0; box-sizing: border-box;
+      caret-color: transparent;
+    }
+    .grey { background: #cfcfcf; }
+    .yellow { background: #f2d36b; }
+    .green { background: #9ee29a; }
+    #controls { margin-top: 10px; }
+    #results, #analysis { margin-top: 16px; max-height: 300px; overflow-y: auto; text-align:left; white-space: pre-wrap; background: #fff; border: 1px solid #eee; padding: 10px; border-radius: 6px; }
+    button { padding: 8px 12px; font-size: 15px; margin: 4px; }
+    p.hint { font-size: 14px; color: #333; }
+    #progress { width: 100%; background: #ddd; height: 16px; border-radius: 8px; overflow: hidden; margin-top: 10px; }
+    #progress-bar { width: 0%; height: 100%; background: #4caf50; text-align: center; color: white; font-size: 12px; line-height: 16px; transition: width 0.3s; }
+  </style>
+</head>
+<body>
+<h1>Wordle Solver</h1>
+<p class="hint">Type guesses (auto-advance). Tap a filled tile to cycle colour. Long-press to clear. Filters auto-update when a row is complete.</p>
+
+<div id="board" aria-label="Wordle input board"></div>
+
+<div id="controls">
+  <button onclick="resetBoard()">Reset board</button>
+</div>
+
+<div id="progress"><div id="progress-bar">0%</div></div>
+<div id="results"><em>Loading word list…</em></div>
+<div id="analysis"></div>
+
+<script>
+const NUM_GUESSES = 6;
+const WORD_LEN = 5;
+let possibleWords = [];
+let allowedWords = [];
+
+/* ---------- Build UI ---------- */
+const board = document.getElementById("board");
+for (let r = 0; r < NUM_GUESSES; r++) {
+  const row = document.createElement("div");
+  row.className = "grid";
+  row.dataset.row = r;
+  for (let c = 0; c < WORD_LEN; c++) {
+    const tile = document.createElement("input");
+    tile.className = "tile grey";
+    tile.maxLength = 1;
+    tile.inputMode = "text";
+    tile.autocomplete = "off";
+    tile.spellcheck = false;
+    tile.dataset.state = "grey";
+    tile.dataset.col = c;
+    tile.dataset.row = r;
+
+    tile.addEventListener("input", (e) => {
+      tile.value = tile.value.toUpperCase();
+      if (tile.value && c < WORD_LEN-1) row.children[c+1].focus();
+      checkRowAndFilter(row);
+    });
+
+    tile.addEventListener("keydown", (e) => {
+      if (e.key === "Backspace" && !tile.value && c > 0) row.children[c-1].focus();
+      else if (e.key === "Enter") applyFilters();
+    });
+
+    tile.addEventListener("click", (e) => {
+      if (tile.value) {
+        e.preventDefault();
+        if (tile.dataset.state === "grey") { tile.dataset.state="yellow"; tile.className="tile yellow"; }
+        else if (tile.dataset.state==="yellow") { tile.dataset.state="green"; tile.className="tile green"; }
+        else { tile.dataset.state="grey"; tile.className="tile grey"; }
+        tile.blur();
+        checkRowAndFilter(row);
+      }
+    });
+
+    let pressTimer;
+    tile.addEventListener("touchstart", () => { pressTimer = setTimeout(()=>clearTile(tile,row),500); });
+    tile.addEventListener("touchend", () => clearTimeout(pressTimer));
+    tile.addEventListener("mousedown", () => { pressTimer = setTimeout(()=>clearTile(tile,row),500); });
+    tile.addEventListener("mouseup", () => clearTimeout(pressTimer));
+
+    row.appendChild(tile);
+  }
+  board.appendChild(row);
+}
+
+function clearTile(tile,row){
+  tile.value = "";
+  tile.dataset.state = "grey";
+  tile.className = "tile grey";
+  tile.focus();
+  checkRowAndFilter(row);
+}
+
+/* ---------- Progress Bar ---------- */
+function setProgress(pct,text=""){
+  const bar=document.getElementById("progress-bar");
+  bar.style.width=pct+"%";
+  bar.textContent=text||pct+"%";
+}
+
+/* ---------- Load Words ---------- */
+async function loadWords() {
+  try {
+    let steps = 3; 
+    let done = 0;
+
+    const update = (msg) => {
+      done++;
+      setProgress(Math.round((done/steps)*100), msg);
+    };
+
+    // Fetch cfreshman's answers
+    const answersURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt";
+    const answersResp = await fetch(answersURL);
+    const answersText = await answersResp.text();
+    let answerList = answersText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
+    update("Answers loaded");
+
+    // Fetch cfreshman's allowed guesses
+    const guessesURL = "https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-allowed-guesses.txt";
+    const guessesResp = await fetch(guessesURL);
+    const guessesText = await guessesResp.text();
+    const guessList = guessesText.split(/\r?\n/).map(w=>w.trim().toLowerCase()).filter(Boolean);
+    update("Guesses loaded");
+
+    // Fetch past answers (with fallback)
+    try {
+      const pastURL = "https://www.rockpapershotgun.com/wordle-past-answers";
+      const pastResp = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(pastURL)}`);
+      const pastData = await pastResp.json();
+      const pastMatches = pastData.contents.match(/\b[a-z]{5}\b/gi) || [];
+      const pastSet = new Set(pastMatches.map(w=>w.toLowerCase()));
+      answerList = answerList.filter(w => !pastSet.has(w));
+      update("Past answers removed");
+    } catch(e){
+      console.warn("Past answers fetch failed",e);
+      update("Past answers skipped");
+    }
+
+    // Set lists
+    allowedWords = Array.from(new Set([...answerList, ...guessList]));
+    possibleWords = answerList.slice();
+
+    showResults(possibleWords,"Loaded");
+    updateAnalysis(possibleWords);
+
+  } catch(err){
+    document.getElementById("results").innerText = "Error loading words: "+err;
+    setProgress(100,"Error");
+  }
+}
+loadWords();
+
+/* ---------- Filtering ---------- */
+function countOccurrences(word,letter){ return [...word].filter(c=>c===letter).length; }
+
+function applyFilters(){
+  let filtered = possibleWords.slice();
+  const rows = document.querySelectorAll(".grid");
+
+  rows.forEach(row=>{
+    const tiles = [...row.querySelectorAll(".tile")];
+    const letters = tiles.map(t=>t.value.trim().toLowerCase());
+    const states = tiles.map(t=>t.dataset.state);
+    if (letters.every(l=>l==="")) return;
+
+    const info = {};
+    for(let i=0;i<WORD_LEN;i++){
+      const L = letters[i]; if(!L) continue;
+      if(!info[L]) info[L]={g:0,y:0,x:0};
+      if(states[i]==="green") info[L].g++;
+      else if(states[i]==="yellow") info[L].y++;
+      else info[L].x++;
+    }
+
+    filtered = filtered.filter(w=>{
+      for(let i=0;i<WORD_LEN;i++) if(states[i]==="green" && w[i]!==letters[i]) return false;
+      for(let i=0;i<WORD_LEN;i++) if(states[i]==="yellow" && (w[i]===letters[i] || !w.includes(letters[i]))) return false;
+      return true;
+    });
+
+    filtered = filtered.filter(w=>{
+      for(const [L,c] of Object.entries(info)){
+        const matched=c.g+c.y;
+        const occ = countOccurrences(w,L);
+        if(c.x>0 && matched===0 && occ!==0) return false;
+        if(c.x>0 && matched>0 && occ!==matched) return false;
+        if(c.x===0 && matched>0 && occ<matched) return false;
+      }
+      return true;
+    });
+  });
+
+  showResults(filtered,"Filtered");
+  updateAnalysis(filtered);
+}
+
+/* ---------- Analysis / Next Best Guess ---------- */
+function analyzeRemainingWordle(filteredWords){
+  const totalWords = filteredWords.length;
+  if(totalWords===0) return {letters:[], nextBestElimination:"(none)", nextBestSolution:"(none)"};
+
+  // Track confirmed letters
+  const confirmed = {positions:{}};
+  const rows = document.querySelectorAll('.grid');
+  rows.forEach(row=>{
+    const tiles = [...row.querySelectorAll('.tile')];
+    tiles.forEach((tile,i)=>{
+      const letter = tile.value.trim().toLowerCase();
+      if(!letter) return;
+      if(tile.dataset.state==='green'){
+        confirmed.positions[letter] = confirmed.positions[letter]||[];
+        if(!confirmed.positions[letter].includes(i)) confirmed.positions[letter].push(i);
+      }
+    });
+  });
+
+  // Count occurrences per position
+  const positionCounts = Array.from({length: WORD_LEN}, () => ({}));
+  for(const word of filteredWords){
+    for(let i=0;i<WORD_LEN;i++){
+      const l = word[i];
+      if(confirmed.positions[l]?.includes(i)) continue; // skip already confirmed greens
+      positionCounts[i][l] = (positionCounts[i][l]||0)+1;
+    }
+  }
+
+  // Compute letter probabilities
+  const letters = {};
+  for(let i=0;i<WORD_LEN;i++){
+    for(const [l,count] of Object.entries(positionCounts[i])){
+      if(!letters[l]) letters[l]=0;
+      letters[l]+=count;
+    }
+  }
+
+  // Result letters
+  const resultLetters=[];
+  for(const [l,totalCount] of Object.entries(letters)){
+    const remainingPositions = WORD_LEN - (confirmed.positions[l]?.length||0);
+    if(remainingPositions<=0) continue;
+    const probability = Math.min((totalCount/(totalWords*remainingPositions))*100,100);
+    resultLetters.push({letter:l.toUpperCase(), probability:probability.toFixed(1)});
+  }
+  for(const [l,pos] of Object.entries(confirmed.positions)){
+    resultLetters.push({letter:l.toUpperCase(), probability:100});
+  }
+  resultLetters.sort((a,b)=>b.probability - a.probability);
+
+  // Frequency map
+  const letterCounts={};
+  for(const word of filteredWords) for(const ch of new Set(word)) letterCounts[ch]=(letterCounts[ch]||0)+1;
+
+  /* ----- Elimination scoring with yellow bias and green avoidance ----- */
+  const yellowHints=[]; const greenHints=[];
+  rows.forEach(row=>{
+    const tiles=[...row.querySelectorAll('.tile')];
+    tiles.forEach((tile,i)=>{
+      const l=tile.value.trim().toLowerCase();
+      if(!l) return;
+      if(tile.dataset.state==='yellow') yellowHints.push({letter:l,pos:i});
+      if(tile.dataset.state==='green') greenHints.push({letter:l,pos:i});
+    });
+  });
+
+  const eliminationScores = allowedWords.map(word=>{
+    const uniqueLetters=[...new Set(word)];
+    let score=0;
+
+    // Favor yellows, but only if not in same position
+    for(const {letter,pos} of yellowHints){
+      if(word.includes(letter) && word[pos]!==letter){
+        score+=50;
+      }
+    }
+
+    // Penalize greens
+    for(const {letter} of greenHints){
+      if(word.includes(letter)) score-=20;
+    }
+
+    // General frequency coverage
+    score+=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
+
+    return {word:word.toUpperCase(), score};
+  });
+  eliminationScores.sort((a,b)=>b.score-a.score);
+  const nextBestElimination=eliminationScores[0]?.word || "(none)";
+
+  // Best likely solution (filteredWords only)
+  const solutionScores = filteredWords.map(w=>{
+    const uniqueLetters=[...new Set(w)];
+    const score=uniqueLetters.reduce((s,l)=>s+(letterCounts[l]||0),0);
+    return {word:w.toUpperCase(), score};
+  });
+  solutionScores.sort((a,b)=>b.score-a.score);
+  const nextBestSolution = solutionScores[0]?.word || "(none)";
+
+  return {letters:resultLetters, nextBestElimination, nextBestSolution};
+}
+
+function updateAnalysis(filteredWords){
+  const analysis = analyzeRemainingWordle(filteredWords);
+  let analysisText = `Next best guess for elimination: ${analysis.nextBestElimination}\n`;
+  analysisText += `Next best guess likely solution: ${analysis.nextBestSolution}\n\nLetter probabilities:\n`;
+  analysis.letters.forEach(l=>analysisText+=`${l.letter}: ${l.probability}%\n`);
+  document.getElementById("analysis").innerText=analysisText;
+}
+
+/* ---------- Auto-filter ---------- */
+function checkRowAndFilter(row){
+  const filled = [...row.children].every(t=>t.value);
+  if(filled) applyFilters();
+}
+
+/* ---------- Reset ---------- */
+function resetBoard(){
+  document.querySelectorAll('.tile').forEach(t=>clearTile(t,t.parentElement));
+  showResults(possibleWords,"Loaded");
+  updateAnalysis(possibleWords);
+}
+
+function showResults(list,label){
+  document.getElementById("results").innerText=`${label} (${list.length}):\n\n`+(list.length?list.slice(0,200).join(", ")+(list.length>200?" …":""):"(no matches)");
+}
+</script>
+</body>
+</html>
