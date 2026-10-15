@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wordle Solver</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#202124;background:#f7f8fa}
+body{max-width:740px;margin:auto;padding:12px 14px 50px}
+h1{font-size:1.7rem;text-align:center;margin:12px}
+p{line-height:1.4}
+.hint{font-size:13px;color:#58616b;text-align:center}
+.board{display:grid;gap:7px;margin:16px auto;width:max-content}
+.guess-row{display:flex;gap:6px}
+.tile{width:clamp(42px,15.5vw,58px);height:clamp(45px,15.5vw,58px);box-sizing:border-box;border:2px solid #a9afb5;border-radius:5px;text-align:center;font-size:25px;font-weight:750;text-transform:uppercase;background:#e1e3e5;color:#171717;caret-color:transparent}
+.tile.yellow{background:#e4c451;border-color:#d4b23e}
+.tile.green{background:#8ac78b;border-color:#65a76a}
+.actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px}
+button{padding:10px 14px;border-radius:7px;border:1px solid #b9bec6;background:white;font-size:14px}
+button:active{background:#ddd}
+.panel{background:white;border:1px solid #e0e3e7;border-radius:10px;padding:13px;margin:12px 0}
+h2{font-size:1rem;margin:0 0 10px}
+#status{font-size:13px;color:#555;margin-top:7px}
+progress{width:100%;height:13px}
+#solutions{max-height:170px;overflow:auto;line-height:1.65;overflow-wrap:anywhere}
+#analysis{font-variant-numeric:tabular-nums}
+.recommendations{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.recommendation{background:#f5f6f8;padding:12px;border-radius:8px;min-width:0}
+.recommendation strong{display:block;font-size:1.5rem;letter-spacing:2px}
+.recommendation small{display:block;color:#555;line-height:1.3}
+.settings{display:flex;align-items:center;gap:7px;font-size:14px;margin:8px 0}
+.probwrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12px;text-align:right;white-space:nowrap}
+th,td{padding:6px 5px;border-bottom:1px solid #eee}
+th:first-child,td:first-child{text-align:left;font-weight:650}
+th{background:#f4f5f6}
+#error{color:#9b2226;font-size:13px}
+.muted{color:#666;font-size:12px}
+@media(max-width:410px){
+.recommendations{gap:5px}
+.recommendation{padding:8px}
+.recommendation strong{font-size:1.25rem}
+th,td{padding:5px 3px;font-size:11px}
+}
+</style>
+</head>
+<body>
+<h1>Wordle Solver</h1>
+<p class="hint">Type a guess, then tap each letter to cycle grey → yellow → green. Long-press to clear a tile. Completed rows update automatically.</p>
+
+<div id="board" class="board" aria-label="Six Wordle guesses"></div>
+
+<div class="actions">
+<button id="reset">Reset</button>
+<button id="refresh">Refresh lists</button>
+</div>
+
+<div class="panel">
+<progress id="progress" max="100" value="0"></progress>
+<div id="status" role="status">Loading… 0%</div>
+<div id="error"></div>
+<label class="settings">
+<input id="preferNew" type="checkbox" checked>
+Prefer answers not used before (repeats still possible)
+</label>
+<div class="muted" id="counts"></div>
+</div>
+
+<div class="panel">
+<h2>Next best guesses</h2>
+<div class="recommendations">
+<div class="recommendation">
+<small>Best for elimination</small>
+<strong id="elim">—</strong>
+<small id="elimDetail">—</small>
+</div>
+<div class="recommendation">
+<small>Best possible solution</small>
+<strong id="solve">—</strong>
+<small id="solveDetail">—</small>
+</div>
+</div>
+</div>
+
+<div class="panel">
+<h2 id="solutionTitle">Possible solutions</h2>
+<div id="solutions">Loading…</div>
+</div>
+
+<div class="panel">
+<h2>Letter probabilities</h2>
+<div class="muted">
+Overall = appears at least once. 2nd / 3rd = appears at least twice / three times. Tile columns are independent probabilities for each position.
+</div>
+<div class="probwrap">
+<table>
+<thead>
+<tr>
+<th>Letter</th><th>Overall</th><th>2nd</th><th>3rd</th>
+<th>1</th><th>2</th><th>3</th><th>4</th><th>5</th>
+</tr>
+</thead>
+<tbody id="probabilities"></tbody>
+</table>
+</div>
+</div>
+
+<script>
+'use strict';
+
+const URLS={
+ answers:'https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt',
+ guesses:'https://gist.githubusercontent.com/cfreshman/cdcdf777450c5b5301e439061d29694c/raw/wordle-allowed-guesses.txt',
+ history:'https://raw.githubusercontent.com/mfilej/wrdl/main/solutions.txt',
+ additions:'https://wordletools.azurewebsites.net/AddedSolutions'
+};
+
+const $=id=>document.getElementById(id);
+let answerPool=[],allowed=[],history=new Set(),ready=false,updateTimer,runId=0;
+const rows=[];
+
+for(let r=0;r<6;r++){
+ const row=document.createElement('div');
+ row.className='guess-row';
+ const tiles=[];
+
+ for(let c=0;c<5;c++){
+  const t=document.createElement('input');
+  t.className='tile';
+  t.maxLength=1;
+  t.autocomplete='off';
+  t.autocapitalize='characters';
+  t.spellcheck=false;
+  t.setAttribute('aria-label',`Guess ${r+1}, letter ${c+1}`);
+  t.dataset.state='grey';
+
+  t.addEventListener('input',()=>{
+   t.value=t.value.replace(/[^a-z]/gi,'').toUpperCase();
+   if(t.value&&c<4)tiles[c+1].focus();
+   scheduleAnalysis();
+  });
+
+  t.addEventListener('keydown',e=>{
+   if(e.key==='Backspace'&&!t.value&&c>0){
+    tiles[c-1].focus();
+    tiles[c-1].value='';
+    scheduleAnalysis();
+   }
+   if(e.key==='Enter'){
+    e.preventDefault();
+    analyze();
+   }
+  });
+
+  let timer,held=false;
+
+  const start=()=>{
+   held=false;
+   clearTimeout(timer);
+   timer=setTimeout(()=>{
+    held=true;
+    t.value='';
+    t.dataset.state='grey';
+    t.className='tile';
+    scheduleAnalysis();
+   },550);
+  };
+
+  const stop=()=>clearTimeout(timer);
+
+  t.addEventListener('pointerdown',start);
+  t.addEventListener('pointerup',stop);
+  t.addEventListener('pointercancel',stop);
+  t.addEventListener('pointerleave',stop);
+  t.addEventListener('contextmenu',e=>e.preventDefault());
+
+  t.addEventListener('click',()=>{
+   if(held){held=false;return;}
+   if(!t.value)return;
+
+   const states=['grey','yellow','green'];
+   t.dataset.state=states[(states.indexOf(t.dataset.state)+1)%3];
+   t.className='tile '+(t.dataset.state==='grey'?'':t.dataset.state);
+   t.blur();
+   scheduleAnalysis();
+  });
+
+  row.appendChild(t);
+  tiles.push(t);
+ }
+
+ $('board').appendChild(row);
+ rows.push(tiles);
+}
+
+function scheduleAnalysis(){
+ clearTimeout(updateTimer);
+ updateTimer=setTimeout(analyze,140);
+}
+
+function progress(n,message){
+ $('progress').value=n;
+ $('status').textContent=message||`Loading… ${n}%`;
+}
+
+function wordsFromText(text){
+ return [...new Set(
+  text.split(/\r?\n/)
+   .map(w=>w.trim().toLowerCase())
+   .filter(w=>/^[a-z]{5}$/.test(w))
+ )];
+}
+
+async function getText(url){
+ const res=await fetch(url,{cache:'no-store'});
+ if(!res.ok)throw new Error(`${res.status} ${url}`);
+ return res.text();
+}
+
+function cacheRead(key){
+ try{
+  return JSON.parse(localStorage.getItem('wordle_'+key)||'null');
+ }catch{
+  return null;
+ }
+}
+
+function cacheWrite(key,data){
+ try{
+  localStorage.setItem('wordle_'+key,JSON.stringify({
+   date:Date.now(),data
+  }));
+ }catch{}
+}
+
+async function resource(key,url,parse,valid,days=7){
+ const cached=cacheRead(key);
+
+ if(cached&&Date.now()-cached.date<days*86400000&&valid(cached.data)){
+  return cached.data;
+ }
+
+ try{
+  const data=parse(await getText(url));
+  if(!valid(data))throw new Error('Invalid '+key+' data');
+  cacheWrite(key,data);
+  return data;
+ }catch(e){
+  if(cached&&valid(cached.data))return cached.data;
+  throw e;
+ }
+}
+
+async function loadWords(force=false){
+ ready=false;
+ $('error').textContent='';
+ progress(5);
+ const token=++runId;
+
+ if(force){
+  for(const key of ['answers','guesses','history','additions']){
+   try{
+    localStorage.removeItem('wordle_'+key);
+   }catch{}
+  }
+ }
+
+ const issues=[];
+
+ try{
+  const [a,g]=await Promise.all([
+   resource('answers',URLS.answers,wordsFromText,a=>a.length>2000),
+   resource('guesses',URLS.guesses,wordsFromText,a=>a.length>8000)
+  ]);
+
+  if(token!==runId)return;
+  progress(50,'Loading… 50%');
+
+  let extras=[];
+
+  try{
+   extras=await resource('additions',URLS.additions,html=>{
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    const output=[];
+
+    for(const tr of doc.querySelectorAll('tr')){
+     const first=tr.querySelector('td');
+     if(!first)continue;
+     const word=first.textContent.trim().toLowerCase();
+     if(/^[a-z]{5}$/.test(word))output.push(word);
+    }
+
+    return [...new Set(output)];
+   },a=>a.length>=30,1);
+  }catch(e){
+   issues.push('NYT additions unavailable; using original answers plus any previously cached additions.');
+  }
+
+  progress(70,'Loading… 70%');
+
+  let dates=[];
+
+  try{
+   dates=await resource('history',URLS.history,txt=>{
+    const result=[];
+
+    for(const line of txt.split(/\r?\n/)){
+     const m=line.trim().match(/^(\d{4}-\d{2}-\d{2})\s+([a-z]{5})$/i);
+     if(m)result.push([m[1],m[2].toLowerCase()]);
+    }
+
+    return result;
+   },a=>a.length>1500,1);
+  }catch(e){
+   issues.push('Historical answers unavailable; previous-answer preference is disabled for this session.');
+  }
+
+  if(token!==runId)return;
+
+  const today=new Date();
+  const localDate=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+
+  history=new Set(
+   dates.filter(([date])=>date<localDate).map(([,word])=>word)
+  );
+
+  answerPool=[...new Set([...a,...extras])].sort();
+  allowed=[...new Set([...a,...g,...extras])].sort();
+
+  ready=true;
+  progress(100,issues.length?'Loaded (some sources unavailable)':'Loaded ✓');
+
+  $('error').textContent=issues.join(' ');
+  $('counts').textContent=`${answerPool.length} candidate answers · ${allowed.length} allowed guesses · ${history.size} historical answers`;
+
+  analyze();
+
+ }catch(e){
+  progress(0,'Unable to load dictionaries');
+  $('error').textContent=e.message+' — Retry using Refresh lists.';
+  $('solutions').textContent='Dictionary unavailable.';
+ }
+}
+
+// Official Wordle feedback:
+// Greens first, then yellows from remaining letter counts.
+function feedback(guess,answer){
+ let result=0;
+ const remaining={};
+ const digits=[0,0,0,0,0];
+
+ for(let i=0;i<5;i++){
+  if(guess[i]===answer[i]){
+   digits[i]=2;
+  }else{
+   remaining[answer[i]]=(remaining[answer[i]]||0)+1;
+  }
+ }
+
+ for(let i=0;i<5;i++){
+  if(digits[i]!==2&&remaining[guess[i]]>0){
+   digits[i]=1;
+   remaining[guess[i]]--;
+  }
+ }
+
+ for(let i=0;i<5;i++)result=result*3+digits[i];
+ return result;
+}
+
+function boardFeedback(tiles){
+ let n=0;
+ for(const t of tiles){
+  n=n*3+(t.dataset.state==='green'?2:t.dataset.state==='yellow'?1:0);
+ }
+ return n;
+}
+
+function getCandidates(){
+ let candidates=answerPool.slice();
+
+ for(const tiles of rows){
+  if(!tiles.every(t=>/^[A-Z]$/.test(t.value)))continue;
+
+  const guess=tiles.map(t=>t.value.toLowerCase()).join('');
+  const pattern=boardFeedback(tiles);
+
+  candidates=candidates.filter(w=>feedback(guess,w)===pattern);
+ }
+
+ return candidates;
+}
+
+function usedGuesses(){
+ return new Set(
+  rows.filter(ts=>ts.every(t=>t.value))
+   .map(ts=>ts.map(t=>t.value.toLowerCase()).join(''))
+ );
+}
+
+// Expected number of remaining candidates = sum(bucketSize²)/N.
+function expectedRemaining(guess,candidates){
+ const buckets=new Map();
+
+ for(const answer of candidates){
+  const p=feedback(guess,answer);
+  buckets.set(p,(buckets.get(p)||0)+1);
+ }
+
+ let sum=0;
+ for(const count of buckets.values())sum+=count*count;
+
+ return sum/candidates.length;
+}
+
+function rank(candidates){
+ if(!candidates.length)return {elim:null,solve:null};
+
+ if(candidates.length===1){
+  return {
+   elim:{word:candidates[0],expected:1},
+   solve:{word:candidates[0],expected:1}
+  };
+ }
+
+ const used=usedGuesses();
+ const preferred=$('preferNew').checked;
+ const fresh=candidates.filter(w=>!history.has(w));
+ const eligible=preferred&&fresh.length?fresh:candidates;
+
+ // Fast preliminary ranking based on balanced letter splits;
+ // evaluate exact partitions for the strongest candidates.
+ const counts={};
+
+ for(const w of candidates){
+  for(const l of new Set(w)){
+   counts[l]=(counts[l]||0)+1;
+  }
+ }
+
+ const approximate=w=>[...new Set(w)].reduce((sum,l)=>{
+  const p=(counts[l]||0)/candidates.length;
+  return sum+p*(1-p);
+ },0);
+
+ const top=allowed.filter(w=>!used.has(w))
+  .map(word=>({word,pre:approximate(word)}))
+  .sort((a,b)=>b.pre-a.pre)
+  .slice(0,candidates.length<=25?allowed.length:Math.min(600,allowed.length));
+
+ const candidateSet=new Set(top.map(x=>x.word));
+
+ for(const w of eligible){
+  if(!used.has(w)&&!candidateSet.has(w)){
+   top.push({word:w});
+   candidateSet.add(w);
+  }
+ }
+
+ let elim=null;
+
+ for(const {word} of top){
+  const expected=expectedRemaining(word,candidates);
+
+  if(!elim||
+     expected<elim.expected-1e-9||
+     (Math.abs(expected-elim.expected)<1e-9&&
+      eligible.includes(word)&&!eligible.includes(elim.word))){
+   elim={word,expected};
+  }
+ }
+
+ let solve=null;
+
+ for(const word of eligible){
+  if(used.has(word))continue;
+
+  const expected=expectedRemaining(word,candidates);
+
+  if(!solve||
+     expected<solve.expected-1e-9||
+     (Math.abs(expected-solve.expected)<1e-9&&word<solve.word)){
+   solve={word,expected};
+  }
+ }
+
+ return {elim,solve:solve||elim};
+}
+
+function showProbabilities(candidates){
+ const body=$('probabilities');
+ body.replaceChildren();
+
+ if(!candidates.length)return;
+
+ const stats=new Map();
+
+ for(const word of candidates){
+  const seen={};
+
+  for(let i=0;i<5;i++){
+   const l=word[i];
+
+   if(!stats.has(l)){
+    stats.set(l,{
+     once:0,twice:0,thrice:0,pos:[0,0,0,0,0]
+    });
+   }
+
+   stats.get(l).pos[i]++;
+   seen[l]=(seen[l]||0)+1;
+  }
+
+  for(const [l,n]of Object.entries(seen)){
+   const s=stats.get(l);
+   s.once++;
+   if(n>=2)s.twice++;
+   if(n>=3)s.thrice++;
+  }
+ }
+
+ const fmt=n=>(100*n/candidates.length).toFixed(1)+'%';
+
+ for(const [l,s] of [...stats.entries()].sort(
+  (a,b)=>b[1].once-a[1].once||a[0].localeCompare(b[0])
+ )){
+  const tr=document.createElement('tr');
+
+  const cells=[
+   l.toUpperCase(),
+   fmt(s.once),
+   s.twice?fmt(s.twice):'—',
+   s.thrice?fmt(s.thrice):'—',
+   ...s.pos.map(fmt)
+  ];
+
+  for(const val of cells){
+   const td=document.createElement('td');
+   td.textContent=val;
+   tr.appendChild(td);
+  }
+
+  body.appendChild(tr);
+ }
+}
+
+function analyze(){
+ if(!ready)return;
+
+ const candidates=getCandidates();
+
+ $('solutionTitle').textContent=`Possible solutions (${candidates.length})`;
+
+ $('solutions').textContent=candidates.length?
+  candidates.slice(0,200).map(w=>w.toUpperCase()).join(', ')+
+  (candidates.length>200?` … (showing 200 of ${candidates.length})`:''):
+  'No matches. Check your tile colours and repeated letters.';
+
+ showProbabilities(candidates);
+
+ $('elim').textContent='Calculating…';
+ $('solve').textContent='Calculating…';
+
+ const current=++runId;
+
+ setTimeout(()=>{
+  if(current!==runId)return;
+
+  const {elim,solve}=rank(candidates);
+
+  if(current!==runId)return;
+
+  $('elim').textContent=elim?.word.toUpperCase()||'—';
+  $('solve').textContent=solve?.word.toUpperCase()||'—';
+
+  $('elimDetail').textContent=elim?
+   `Expected ${elim.expected.toFixed(2)} candidates after feedback`:
+   'No candidate';
+
+  $('solveDetail').textContent=solve?
+   `One of ${candidates.length} possible answers${history.has(solve.word)?' · used before':''}`:
+   'No candidate';
+ },25);
+}
+
+$('reset').addEventListener('click',()=>{
+ for(const row of rows){
+  for(const t of row){
+   t.value='';
+   t.dataset.state='grey';
+   t.className='tile';
+  }
+ }
+ analyze();
+});
+
+$('refresh').addEventListener('click',()=>loadWords(true));
+$('preferNew').addEventListener('change',analyze);
+
+loadWords();
+</script>
+</body>
+</html>
